@@ -8,8 +8,7 @@ export const VirtualProps = {
     required: true
   },
   dataSources: {
-    type: Array,
-    required: true
+    type: Array
   },
   dataComponent: {
     type: [Object, Function],
@@ -26,6 +25,14 @@ export const VirtualProps = {
   estimateSize: {
     type: Number,
     default: 50
+  },
+  dataSourceDelegate: {
+    type: Object,
+    default: null
+  },
+  listID: {
+    type: Number,
+    default: 0
   },
 
   direction: {

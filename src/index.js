@@ -21,16 +21,12 @@ const VirtualList = Vue.component('virtual-list', {
 
   data () {
     return {
-      range: null
+      range: null,
+      tempDataSources: []
     }
   },
 
   watch: {
-    'dataSources.length' () {
-      this.virtual.updateParam('uniqueIds', this.getUniqueIdFromDataSources())
-      this.virtual.handleDataSourcesChange()
-    },
-
     keeps (newValue) {
       this.virtual.updateParam('keeps', newValue)
       this.virtual.updateParam('buffer', Math.round(newValue / 3))
@@ -47,6 +43,13 @@ const VirtualList = Vue.component('virtual-list', {
   },
 
   created () {
+    if (this.dataSources) {
+      this.$watch('dataSources.length', () => {
+        this.virtual.updateParam('uniqueIds', this.getUniqueIdFromDataSources())
+        this.virtual.handleDataSourcesChange()
+      }, { immediate: true })
+    }
+
     this.isHorizontal = this.direction === 'horizontal'
     this.directionKey = this.isHorizontal ? 'scrollLeft' : 'scrollTop'
 
@@ -92,6 +95,11 @@ const VirtualList = Vue.component('virtual-list', {
   },
 
   methods: {
+    refreshList () {
+      this.tempDataSources = []
+      this.virtual.handleDataSourcesChange()
+    },
+
     // get item size by id
     getSize (id) {
       return this.virtual.sizes.get(id)
@@ -99,7 +107,11 @@ const VirtualList = Vue.component('virtual-list', {
 
     // get the total number of stored (rendered) items
     getSizes () {
-      return this.virtual.sizes.size
+      if (this.dataSourceDelegate) {
+        return this.dataSourceDelegate.numItems
+      } else {
+        return this.virtual.sizes.size
+      }
     },
 
     // return current scroll offset
@@ -150,7 +162,8 @@ const VirtualList = Vue.component('virtual-list', {
     // set current scroll position to a expectant index
     scrollToIndex (index) {
       // scroll to bottom
-      if (index >= this.dataSources.length - 1) {
+      if (index >= (this.dataSourceDelegate
+        ? this.dataSourceDelegate.numItems : this.dataSources.length) - 1) {
         this.scrollToBottom()
       } else {
         const offset = this.virtual.getOffset(index)
@@ -191,6 +204,7 @@ const VirtualList = Vue.component('virtual-list', {
     // reset all state back to initial
     reset () {
       this.virtual.destroy()
+      this.tempDataSources = []
       this.scrollToOffset(0)
       this.installVirtual()
     },
@@ -204,7 +218,9 @@ const VirtualList = Vue.component('virtual-list', {
         keeps: this.keeps,
         estimateSize: this.estimateSize,
         buffer: Math.round(this.keeps / 3), // recommend for a third of keeps
-        uniqueIds: this.getUniqueIdFromDataSources()
+        ...(this.dataSources && { uniqueIds: this.getUniqueIdFromDataSources() }),
+        // delegate things
+        ...(this.dataSourceDelegate && { delegate: this.dataSourceDelegate })
       }, this.onRangeChanged)
 
       // sync initial range
@@ -216,9 +232,31 @@ const VirtualList = Vue.component('virtual-list', {
       return this.dataSources.map((dataSource) => typeof dataKey === 'function' ? dataKey(dataSource) : dataSource[dataKey])
     },
 
+    /**
+     * updateItem()
+     *
+     * Updates a part of the virtual list array and prompts a rerender.
+     * Useful when the retrieval of data is asynchronous, and temporary data
+     * had to be put in during render; can be used as a
+     * kind of callback function in the delegate's getDataSourceItem() function
+     *
+     * @param {number} idx index in the greater list where the data goes
+     * @param {object} data
+     */
+    updateItem (idx, data) {
+      if (this.range.start <= idx && idx <= this.range.end) {
+        // tempDataSources is 0-indexed
+        this.tempDataSources[idx - this.range.start] = data
+        // cause a re-render
+        this.virtual.updateRange(this.range.start, this.range.end)
+      }
+    },
+
     // event called when each item mounted or size changed
     onItemResized (id, size) {
-      this.virtual.saveSize(id, size)
+      if (this.dataSources) {
+        this.virtual.saveSize(id, size)
+      }
       this.$emit('resized', id, size)
     },
 
@@ -237,6 +275,28 @@ const VirtualList = Vue.component('virtual-list', {
 
     // here is the rerendering entry
     onRangeChanged (range) {
+      if (this.dataSourceDelegate) {
+        // Shift items in tempDataSources to get ready for rendering:
+
+        if (this.range) {
+          // index that marks the last item in tempDataSources that we want to preserve
+          const endOfRange = Math.min(this.range.end, range.end) - this.range.start
+          // get rid of items that are now out of range
+          this.tempDataSources.splice(endOfRange + 1, this.tempDataSources.length)
+
+          // represents what index in the new array this range will start at
+          const relativeStartIndex = Math.max(this.range.start - range.start, 0)
+          // The "padding" on the left of the array, where
+          // yet unrendered items will go
+          const leftPadding = new Array(relativeStartIndex)
+
+          // Where to find the beginning of the new range in the current
+          // tempDataSources array--offset since tempDataSources is 0-indexed
+          const startOfRange = Math.max(this.range.start, range.start) - this.range.start
+          this.tempDataSources.splice(0, startOfRange, ...leftPadding)
+        }
+      }
+
       this.range = range
     },
 
@@ -258,7 +318,7 @@ const VirtualList = Vue.component('virtual-list', {
     emitEvent (offset, clientSize, scrollSize, evt) {
       this.$emit('scroll', evt, this.virtual.getRange())
 
-      if (this.virtual.isFront() && !!this.dataSources.length && (offset - this.topThreshold <= 0)) {
+      if (this.virtual.isFront() && !!(this.dataSourceDelegate ? this.dataSourceDelegate.numItems : this.dataSources.length) && (offset - this.topThreshold <= 0)) {
         this.$emit('totop')
       } else if (this.virtual.isBehind() && (offset + clientSize + this.bottomThreshold >= scrollSize)) {
         this.$emit('tobottom')
@@ -271,9 +331,11 @@ const VirtualList = Vue.component('virtual-list', {
     getRenderSlots (h) {
       const slots = []
       const { start, end } = this.range
-      const { dataSources, dataKey, itemClass, itemTag, itemStyle, isHorizontal, extraProps, dataComponent, itemScopedSlots } = this
+      const { dataSources, tempDataSources, dataKey, itemClass, itemTag, itemStyle, isHorizontal, extraProps, dataComponent, itemScopedSlots } = this
       for (let index = start; index <= end; index++) {
-        const dataSource = dataSources[index]
+        const dataSource = dataSources ? dataSources[index]
+          : tempDataSources[index - start] ? tempDataSources[index - start]
+            : this.dataSourceDelegate.getDataSourceItem(index)
         if (dataSource) {
           const uniqueKey = typeof dataKey === 'function' ? dataKey(dataSource) : dataSource[dataKey]
           if (typeof uniqueKey === 'string' || typeof uniqueKey === 'number') {

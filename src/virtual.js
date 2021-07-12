@@ -76,7 +76,7 @@ export default class Virtual {
   updateParam (key, value) {
     if (this.param && (key in this.param)) {
       // if uniqueIds change, find out deleted id and remove from size map
-      if (key === 'uniqueIds') {
+      if (!this.param.delegate && key === 'uniqueIds') {
         this.sizes.forEach((v, key) => {
           if (!value.includes(key)) {
             this.sizes.delete(key)
@@ -184,15 +184,17 @@ export default class Virtual {
       return 0
     }
 
-    // if is fixed type, that can be easily
+    // if is fixed type, that can be easily calculated
     if (this.isFixedType()) {
-      return Math.floor(offset / this.fixedSizeValue)
+      // If fixedSizeValue is still 0, saveSize must not have gotten called, so
+      // we must have a delegate.
+      return Math.floor(offset / (this.fixedSizeValue || this.param.delegate.itemSize))
     }
 
     let low = 0
     let middle = 0
     let middleOffset = 0
-    let high = this.param.uniqueIds.length
+    let high = this.param.delegate ? this.param.delegate.numItems : this.param.uniqueIds.length
 
     while (low <= high) {
       // this.__bsearchCalls++
@@ -220,13 +222,20 @@ export default class Virtual {
 
     let offset = 0
     let indexSize = 0
-    for (let index = 0; index < givenIndex; index++) {
-      // this.__getIndexOffsetCalls++
-      indexSize = this.sizes.get(this.param.uniqueIds[index])
-      offset = offset + (typeof indexSize === 'number' ? indexSize : this.getEstimateSize())
-    }
 
-    // remember last calculate index
+    if (this.param.delegate && this.param.delegate.itemSize !== -1) {
+      offset = this.param.delegate.itemSize * givenIndex
+    } else {
+      for (let index = 0; index < givenIndex; index++) {
+        if (this.param.delegate) {
+          offset += this.param.delegate.getItemSize(index)
+        } else {
+          indexSize = this.sizes.get(this.param.uniqueIds[index])
+          offset = offset + (typeof indexSize === 'number' ? indexSize : this.getEstimateSize())
+        }
+      }
+    }
+    // remember last calculated index
     this.lastCalcIndex = Math.max(this.lastCalcIndex, givenIndex - 1)
     this.lastCalcIndex = Math.min(this.lastCalcIndex, this.getLastIndex())
 
@@ -235,19 +244,23 @@ export default class Virtual {
 
   // is fixed size type
   isFixedType () {
-    return this.calcType === CALC_TYPE.FIXED
+    return this.calcType === CALC_TYPE.FIXED || (this.param.delegate && this.param.delegate.itemSize !== -1)
   }
 
   // return the real last index
   getLastIndex () {
-    return this.param.uniqueIds.length - 1
+    if (this.param.delegate) {
+      return this.param.delegate.numItems - 1
+    } else {
+      return this.param.uniqueIds.length - 1
+    }
   }
 
   // in some conditions range is broke, we need correct it
   // and then decide whether need update to next range
   checkRange (start, end) {
     const keeps = this.param.keeps
-    const total = this.param.uniqueIds.length
+    const total = this.param.delegate ? this.param.delegate.numItems : this.param.uniqueIds.length
 
     // datas less than keeps, render all
     if (total <= keeps) {
@@ -282,7 +295,7 @@ export default class Virtual {
   // return total front offset
   getPadFront () {
     if (this.isFixedType()) {
-      return this.fixedSizeValue * this.range.start
+      return (this.fixedSizeValue || this.param.delegate.itemSize) * this.range.start
     } else {
       return this.getIndexOffset(this.range.start)
     }
@@ -294,10 +307,10 @@ export default class Virtual {
     const lastIndex = this.getLastIndex()
 
     if (this.isFixedType()) {
-      return (lastIndex - end) * this.fixedSizeValue
+      return (lastIndex - end) * (this.fixedSizeValue || this.param.delegate.itemSize)
     }
 
-    // if it's all calculated, return the exactly offset
+    // if it's all calculated, return the exact offset
     if (this.lastCalcIndex === lastIndex) {
       return this.getIndexOffset(lastIndex) - this.getIndexOffset(end)
     } else {
@@ -308,6 +321,6 @@ export default class Virtual {
 
   // get the item estimate size
   getEstimateSize () {
-    return this.isFixedType() ? this.fixedSizeValue : (this.firstRangeAverageSize || this.param.estimateSize)
+    return this.isFixedType() ? (this.fixedSizeValue || this.param.delegate.itemSize) : (this.firstRangeAverageSize || this.param.estimateSize)
   }
 }
