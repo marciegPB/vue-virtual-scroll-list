@@ -204,7 +204,7 @@
 
         if (this.param && key in this.param) {
           // if uniqueIds change, find out deleted id and remove from size map
-          if (key === 'uniqueIds') {
+          if (!this.param.delegate && key === 'uniqueIds') {
             this.sizes.forEach(function (v, key) {
               if (!value.includes(key)) {
                 _this.sizes["delete"](key);
@@ -318,17 +318,19 @@
 
         if (offset <= 0) {
           return 0;
-        } // if is fixed type, that can be easily
+        } // if is fixed type, that can be easily calculated
 
 
         if (this.isFixedType()) {
-          return Math.floor(offset / this.fixedSizeValue);
+          // If fixedSizeValue is still 0, saveSize must not have gotten called, so
+          // we must have a delegate.
+          return Math.floor(offset / (this.fixedSizeValue || this.param.delegate.itemSize));
         }
 
         var low = 0;
         var middle = 0;
         var middleOffset = 0;
-        var high = this.param.uniqueIds.length;
+        var high = this.param.delegate ? this.param.delegate.numItems : this.param.uniqueIds.length;
 
         while (low <= high) {
           // this.__bsearchCalls++
@@ -358,11 +360,18 @@
         var offset = 0;
         var indexSize = 0;
 
-        for (var index = 0; index < givenIndex; index++) {
-          // this.__getIndexOffsetCalls++
-          indexSize = this.sizes.get(this.param.uniqueIds[index]);
-          offset = offset + (typeof indexSize === 'number' ? indexSize : this.getEstimateSize());
-        } // remember last calculate index
+        if (this.param.delegate && this.param.delegate.itemSize !== -1) {
+          offset = this.param.delegate.itemSize * givenIndex;
+        } else {
+          for (var index = 0; index < givenIndex; index++) {
+            if (this.param.delegate) {
+              offset += this.param.delegate.getItemSize(index);
+            } else {
+              indexSize = this.sizes.get(this.param.uniqueIds[index]);
+              offset = offset + (typeof indexSize === 'number' ? indexSize : this.getEstimateSize());
+            }
+          }
+        } // remember last calculated index
 
 
         this.lastCalcIndex = Math.max(this.lastCalcIndex, givenIndex - 1);
@@ -373,13 +382,17 @@
     }, {
       key: "isFixedType",
       value: function isFixedType() {
-        return this.calcType === CALC_TYPE.FIXED;
+        return this.calcType === CALC_TYPE.FIXED || this.param.delegate && this.param.delegate.itemSize !== -1;
       } // return the real last index
 
     }, {
       key: "getLastIndex",
       value: function getLastIndex() {
-        return this.param.uniqueIds.length - 1;
+        if (this.param.delegate) {
+          return this.param.delegate.numItems - 1;
+        } else {
+          return this.param.uniqueIds.length - 1;
+        }
       } // in some conditions range is broke, we need correct it
       // and then decide whether need update to next range
 
@@ -387,7 +400,7 @@
       key: "checkRange",
       value: function checkRange(start, end) {
         var keeps = this.param.keeps;
-        var total = this.param.uniqueIds.length; // datas less than keeps, render all
+        var total = this.param.delegate ? this.param.delegate.numItems : this.param.uniqueIds.length; // datas less than keeps, render all
 
         if (total <= keeps) {
           start = 0;
@@ -424,7 +437,7 @@
       key: "getPadFront",
       value: function getPadFront() {
         if (this.isFixedType()) {
-          return this.fixedSizeValue * this.range.start;
+          return (this.fixedSizeValue || this.param.delegate.itemSize) * this.range.start;
         } else {
           return this.getIndexOffset(this.range.start);
         }
@@ -437,8 +450,8 @@
         var lastIndex = this.getLastIndex();
 
         if (this.isFixedType()) {
-          return (lastIndex - end) * this.fixedSizeValue;
-        } // if it's all calculated, return the exactly offset
+          return (lastIndex - end) * (this.fixedSizeValue || this.param.delegate.itemSize);
+        } // if it's all calculated, return the exact offset
 
 
         if (this.lastCalcIndex === lastIndex) {
@@ -452,7 +465,7 @@
     }, {
       key: "getEstimateSize",
       value: function getEstimateSize() {
-        return this.isFixedType() ? this.fixedSizeValue : this.firstRangeAverageSize || this.param.estimateSize;
+        return this.isFixedType() ? this.fixedSizeValue || this.param.delegate.itemSize : this.firstRangeAverageSize || this.param.estimateSize;
       }
     }]);
 
@@ -468,8 +481,7 @@
       required: true
     },
     dataSources: {
-      type: Array,
-      required: true
+      type: Array
     },
     dataComponent: {
       type: [Object, Function],
@@ -485,6 +497,14 @@
     estimateSize: {
       type: Number,
       "default": 50
+    },
+    dataSourceDelegate: {
+      type: Object,
+      "default": null
+    },
+    listID: {
+      type: Number,
+      "default": 0
     },
     direction: {
       type: String,
@@ -691,9 +711,6 @@
     }
   });
 
-  /**
-   * virtual list default component
-   */
   var EVENT_TYPE = {
     ITEM: 'item_resize',
     SLOT: 'slot_resize'
@@ -707,14 +724,11 @@
     props: VirtualProps,
     data: function data() {
       return {
-        range: null
+        range: null,
+        tempDataSources: []
       };
     },
     watch: {
-      'dataSources.length': function dataSourcesLength() {
-        this.virtual.updateParam('uniqueIds', this.getUniqueIdFromDataSources());
-        this.virtual.handleDataSourcesChange();
-      },
       keeps: function keeps(newValue) {
         this.virtual.updateParam('keeps', newValue);
         this.virtual.updateParam('buffer', Math.round(newValue / 3));
@@ -728,6 +742,18 @@
       }
     },
     created: function created() {
+      var _this = this;
+
+      if (this.dataSources) {
+        this.$watch('dataSources.length', function () {
+          _this.virtual.updateParam('uniqueIds', _this.getUniqueIdFromDataSources());
+
+          _this.virtual.handleDataSourcesChange();
+        }, {
+          immediate: true
+        });
+      }
+
       this.isHorizontal = this.direction === 'horizontal';
       this.directionKey = this.isHorizontal ? 'scrollLeft' : 'scrollTop';
       this.installVirtual(); // listen item size change
@@ -766,13 +792,21 @@
       }
     },
     methods: {
+      refreshList: function refreshList() {
+        this.tempDataSources = [];
+        this.virtual.handleDataSourcesChange();
+      },
       // get item size by id
       getSize: function getSize(id) {
         return this.virtual.sizes.get(id);
       },
       // get the total number of stored (rendered) items
       getSizes: function getSizes() {
-        return this.virtual.sizes.size;
+        if (this.dataSourceDelegate) {
+          return this.dataSourceDelegate.numItems;
+        } else {
+          return this.virtual.sizes.size;
+        }
       },
       // return current scroll offset
       getOffset: function getOffset() {
@@ -821,7 +855,7 @@
       // set current scroll position to a expectant index
       scrollToIndex: function scrollToIndex(index) {
         // scroll to bottom
-        if (index >= this.dataSources.length - 1) {
+        if (index >= (this.dataSourceDelegate ? this.dataSourceDelegate.numItems : this.dataSources.length) - 1) {
           this.scrollToBottom();
         } else {
           var offset = this.virtual.getOffset(index);
@@ -830,7 +864,7 @@
       },
       // set current scroll position to bottom
       scrollToBottom: function scrollToBottom() {
-        var _this = this;
+        var _this2 = this;
 
         var shepherd = this.$refs.shepherd;
 
@@ -841,8 +875,8 @@
           // so we need retry in next event loop until it really at bottom
 
           setTimeout(function () {
-            if (_this.getOffset() + _this.getClientSize() < _this.getScrollSize()) {
-              _this.scrollToBottom();
+            if (_this2.getOffset() + _this2.getClientSize() < _this2.getScrollSize()) {
+              _this2.scrollToBottom();
             }
           }, 3);
         }
@@ -862,20 +896,23 @@
       // reset all state back to initial
       reset: function reset() {
         this.virtual.destroy();
+        this.tempDataSources = [];
         this.scrollToOffset(0);
         this.installVirtual();
       },
       // ----------- public method end -----------
       installVirtual: function installVirtual() {
-        this.virtual = new Virtual({
+        this.virtual = new Virtual(_objectSpread2({
           slotHeaderSize: 0,
           slotFooterSize: 0,
           keeps: this.keeps,
           estimateSize: this.estimateSize,
-          buffer: Math.round(this.keeps / 3),
-          // recommend for a third of keeps
+          buffer: Math.round(this.keeps / 3)
+        }, this.dataSources && {
           uniqueIds: this.getUniqueIdFromDataSources()
-        }, this.onRangeChanged); // sync initial range
+        }, {}, this.dataSourceDelegate && {
+          delegate: this.dataSourceDelegate
+        }), this.onRangeChanged); // sync initial range
 
         this.range = this.virtual.getRange();
       },
@@ -885,9 +922,32 @@
           return typeof dataKey === 'function' ? dataKey(dataSource) : dataSource[dataKey];
         });
       },
+
+      /**
+       * updateItem()
+       *
+       * Updates a part of the virtual list array and prompts a rerender.
+       * Useful when the retrieval of data is asynchronous, and temporary data
+       * had to be put in during render; can be used as a
+       * kind of callback function in the delegate's getDataSourceItem() function
+       *
+       * @param {number} idx index in the greater list where the data goes
+       * @param {object} data
+       */
+      updateItem: function updateItem(idx, data) {
+        if (this.range.start <= idx && idx <= this.range.end) {
+          // tempDataSources is 0-indexed
+          this.tempDataSources[idx - this.range.start] = data; // cause a re-render
+
+          this.virtual.updateRange(this.range.start, this.range.end);
+        }
+      },
       // event called when each item mounted or size changed
       onItemResized: function onItemResized(id, size) {
-        this.virtual.saveSize(id, size);
+        if (this.dataSources) {
+          this.virtual.saveSize(id, size);
+        }
+
         this.$emit('resized', id, size);
       },
       // event called when slot mounted or size changed
@@ -904,6 +964,28 @@
       },
       // here is the rerendering entry
       onRangeChanged: function onRangeChanged(range) {
+        if (this.dataSourceDelegate) {
+          // Shift items in tempDataSources to get ready for rendering:
+          if (this.range) {
+            var _this$tempDataSources;
+
+            // index that marks the last item in tempDataSources that we want to preserve
+            var endOfRange = Math.min(this.range.end, range.end) - this.range.start; // get rid of items that are now out of range
+
+            this.tempDataSources.splice(endOfRange + 1, this.tempDataSources.length); // represents what index in the new array this range will start at
+
+            var relativeStartIndex = Math.max(this.range.start - range.start, 0); // The "padding" on the left of the array, where
+            // yet unrendered items will go
+
+            var leftPadding = new Array(relativeStartIndex); // Where to find the beginning of the new range in the current
+            // tempDataSources array--offset since tempDataSources is 0-indexed
+
+            var startOfRange = Math.max(this.range.start, range.start) - this.range.start;
+
+            (_this$tempDataSources = this.tempDataSources).splice.apply(_this$tempDataSources, [0, startOfRange].concat(leftPadding));
+          }
+        }
+
         this.range = range;
       },
       onScroll: function onScroll(evt) {
@@ -922,7 +1004,7 @@
       emitEvent: function emitEvent(offset, clientSize, scrollSize, evt) {
         this.$emit('scroll', evt, this.virtual.getRange());
 
-        if (this.virtual.isFront() && !!this.dataSources.length && offset - this.topThreshold <= 0) {
+        if (this.virtual.isFront() && !!(this.dataSourceDelegate ? this.dataSourceDelegate.numItems : this.dataSources.length) && offset - this.topThreshold <= 0) {
           this.$emit('totop');
         } else if (this.virtual.isBehind() && offset + clientSize + this.bottomThreshold >= scrollSize) {
           this.$emit('tobottom');
@@ -937,6 +1019,7 @@
             start = _this$range.start,
             end = _this$range.end;
         var dataSources = this.dataSources,
+            tempDataSources = this.tempDataSources,
             dataKey = this.dataKey,
             itemClass = this.itemClass,
             itemTag = this.itemTag,
@@ -947,7 +1030,7 @@
             itemScopedSlots = this.itemScopedSlots;
 
         for (var index = start; index <= end; index++) {
-          var dataSource = dataSources[index];
+          var dataSource = dataSources ? dataSources[index] : tempDataSources[index - start] ? tempDataSources[index - start] : this.dataSourceDelegate.getDataSourceItem(index);
 
           if (dataSource) {
             var uniqueKey = typeof dataKey === 'function' ? dataKey(dataSource) : dataSource[dataKey];
